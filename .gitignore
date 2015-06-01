@@ -5,6 +5,6 @@
 .DS_Store
 /build
 
-*.class
+.class
 opencvjava/build
 usbSerialForAndroid/build
