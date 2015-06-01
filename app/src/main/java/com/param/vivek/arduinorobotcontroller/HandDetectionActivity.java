@@ -163,53 +163,44 @@ public class HandDetectionActivity extends Activity implements CvCameraViewListe
 //        return cornerDetection(inputFrame);
     }
 
-    private Mat skinDetectionYCRCB(CvCameraViewFrame inputFrame) {
-        mRgba = inputFrame.rgba();
-        Mat output = new Mat();
-
-        Scalar minYCrCb = new Scalar(0,133,77);
-        Scalar maxYCrCb = new Scalar(255,173,127);
-
-        Imgproc.cvtColor(mRgba, output, Imgproc.COLOR_RGB2YCrCb);
-
-        Mat inRangeMatrix = new Mat();
-        Core.inRange(output, minYCrCb, maxYCrCb, inRangeMatrix);
-
-        List<MatOfPoint> contours = new LinkedList<>();
-        Mat hierarchy = new Mat();
-        Imgproc.findContours(inRangeMatrix, contours, hierarchy, Imgproc.RETR_EXTERNAL, Imgproc.CHAIN_APPROX_SIMPLE);
-        for(int i = 0; i < contours.size(); i++) {
-            MatOfPoint c = contours.get(i);
-            if(Imgproc.contourArea(c) > 1000) {
-                Imgproc.drawContours(mRgba, contours, i , new Scalar(0, 255, 0), 3);
-            }
-        }
-        return mRgba;
-    }
     private Mat skinDetection(CvCameraViewFrame inputFrame) {
+        // Get start time for optimization purposes
+        long skinDetectionStartTime = System.currentTimeMillis();
+
+        // convert image to rgba
         mRgba = inputFrame.rgba();
+        Mat flipped = new Mat();
+        Core.flip(mRgba, flipped, 1); // flip around y axis
+
         // local params
         int downFactor = 2;
-        int shiftFactor = 10;
+        int shiftFactor = 15;
 
-
-
+        // downsample image for faster processing
         Mat down = new Mat();
-        Imgproc.pyrDown(mRgba, down, new Size(mRgba.cols() / downFactor, mRgba.rows() / downFactor));
+        Imgproc.pyrDown(flipped, down, new Size(mRgba.cols() / downFactor, mRgba.rows() / downFactor));
+
+        // find center of image
+        int imgCenterRow = down.rows() / 2;
+        int imgCenterCol = down.cols() / 2;
+        Point imgCenterPoint = new Point(imgCenterCol, imgCenterRow);
+
         // init to zeroes
         Mat handPossibilities = Mat.zeros(new Size(mRgba.cols() / downFactor, mRgba.rows() / downFactor), mRgba.type());
 
         // set of points (row, col)
         List<Point> handPossiblePoints = new LinkedList<Point>();
 
-//        Imgproc
+        // For each shiftFactor'th point, calculate
+        // whether or not it is a skin-colored pixel.
+        // If it is skin-colored, mark it as so and
+        // add the point to handPossiblePoints.
         long startTime = System.currentTimeMillis();
         for(int j = 0; j < down.rows(); j += shiftFactor) {
             for(int i = 0; i < down.cols(); i += shiftFactor) {
                 double[] rgb = down.get(j, i);
                 Scalar color = new Scalar(rgb[0], rgb[1], rgb[2]);
                 if(isSkinRGB((int)rgb[0], (int) rgb[1],(int) rgb[2])) {
-//                if(isSkin(color)) {
                     rgb[0] = 255; // rgb[0] (HIGH) signifies this is a hand point
                     rgb[1] = 255; // rgb[1] (HIGH) signifies that this point has not been processed
                     rgb[2] = 255; // this is irrelevant right now
@@ -220,19 +211,11 @@ public class HandDetectionActivity extends Activity implements CvCameraViewListe
                 }
             }
         }
-        Log.i("TAG", "[time] SKIN_DETECTION took: " + (System.currentTimeMillis() - startTime) + " ms");
-        Log.i("TAG", "[time] SKIN_DETECTION result points: " + handPossiblePoints.size());
+        Log.i(TAG, "[time] SKIN_DETECTION took: " + (System.currentTimeMillis() - startTime) + " ms");
 
         // Construct downsized result matrix
         Mat resultDown = new Mat();
-        Imgproc.pyrDown(mRgba, resultDown, new Size(mRgba.cols() / downFactor, mRgba.rows() / downFactor));
-
-//        add a point at every possible location
-//        for(int j = 0; j < down.rows(); j += shiftFactor) {
-//            for (int i = 0; i < down.cols(); i += shiftFactor) {
-//                Imgproc.circle(resultDown, new Point(i, j), 3, new Scalar(128, 128, 128), 2, 8, 0);
-//            }
-//        }
+        Imgproc.pyrDown(flipped, resultDown, new Size(mRgba.cols() / downFactor, mRgba.rows() / downFactor));
 
         // Copy all possible points into result so we can see the guesses
         for(Point clusterPoint : handPossiblePoints) {
@@ -240,21 +223,11 @@ public class HandDetectionActivity extends Activity implements CvCameraViewListe
             Imgproc.circle(resultDown, new Point(clusterPoint.x, clusterPoint.y), 3, new Scalar(128, 128, 128), 2, 8, 0);
         }
 
-        // Stores all possible clusters, each of which is a Set<Point>
-//        Set<Set<Point>> clusters = new HashSet<Set<Point>>();
 
+        // Perform euclidean cluster extraction
         startTime = System.currentTimeMillis();
-        // generate all clusters
-//        while(handPossiblePoints.size() > 0) {
-//            Point p = handPossiblePoints.remove(0);
-//            clusters.add(clusterHelper(p, handPossibilities, clusters, 0, shiftFactor));
-////            Log.i("TAG", "[time] handPossiblePoints.size(): " + handPossiblePoints.size());
-//
-//
-//        }
-
         Set<Set<Point>> clusters = euclideanClustering(handPossiblePoints, handPossibilities, shiftFactor);
-        Log.i("TAG", "[time] GENERATE_CLUSTERS took: " + (System.currentTimeMillis() - startTime) + " ms -- numClusters: " + clusters.size());
+        Log.i(TAG, "[time] GENERATE_CLUSTERS took: " + (System.currentTimeMillis() - startTime) + " ms -- numClusters: " + clusters.size());
 
         // find largest cluster
         int max = 0;
@@ -265,31 +238,69 @@ public class HandDetectionActivity extends Activity implements CvCameraViewListe
                 largestCluster = cluster;
             }
         }
-        Log.i(TAG, "[cluster] Largest Cluster size is " + largestCluster.size());
+        // Log.i(TAG, "[cluster] Largest Cluster size is " + largestCluster.size());
 
+        // Draw the largest cluster in resultDown
+        for (Point clusterPoint : largestCluster) {
+            Scalar clusterColor = new Scalar(0, 128, 255);
+            Imgproc.circle(resultDown, new Point(clusterPoint.x, clusterPoint.y), 5, clusterColor, 2, 8, 0);
+        }
 
-        Scalar clusterColor = new Scalar(0, 128, 255);
+        // get the centroid of the largest cluster
+        Point centroid = centroid(largestCluster);
 
-        // downsized version of result
-//        for(Set<Point> cluster: clusters) {
-            for (Point clusterPoint : largestCluster) {
-//              Log.d(TAG, "[cluster] adding point from largest cluster");
-//              resultDown.put((int) clusterPoint.x, (int) clusterPoint.y, color);
-                Imgproc.circle(resultDown, new Point(clusterPoint.x, clusterPoint.y), 5, clusterColor, 2, 8, 0);
+        // draw the centroid in ResultDown
+        Imgproc.circle(resultDown, centroid, 7, new Scalar(0, 255, 0));
+        Imgproc.circle(resultDown, centroid, 5, new Scalar(255, 0, 0));
+        Imgproc.circle(resultDown, centroid, 9, new Scalar(0, 0, 255));
+
+        // draw the centerPoint of image:
+        Imgproc.circle(resultDown, centroid, 9, new Scalar(255, 0, 255), 9);
+        Imgproc.circle(resultDown, centroid, 7, new Scalar(0, 255, 255));
+
+        // draw direction rectangles, find which one centroid is in
+        Scalar white = new Scalar(255, 255, 255);
+        Scalar selected = new Scalar(0, 255, 0);
+        for(int n = 0; n < 5; n++) {
+            Scalar color = white;
+            if(centroid.x > n * down.cols() / 5 && centroid.x < (1+n) * down.cols() / 5) {
+                color = selected;
             }
+            Imgproc.rectangle(resultDown, new Point(n * down.cols() / 5, 0), new Point((1+n) * down.cols() / 5, down.rows()), color, 7);
+        }
 
-//            // change colors
-//            double[] colors = clusterColor.val;
-//            colors[0] += 100;
-//            colors[1] += 150;
-//            colors[2] += 200;
-//            clusterColor.set(colors);
-//        }
+
         Mat result = new Mat();
         Imgproc.pyrUp(resultDown, result, new Size(mRgba.cols(), mRgba.rows()));
+
+        // calculate direction to send Robot
+
+        if(distance(centroid, imgCenterPoint) > 100) {
+            if(centroid.x > imgCenterCol + 200) {
+
+            }
+        }
+
+        Log.e(TAG, "[time] SKIN_DETECT_AND_CLUSTER took: " + (System.currentTimeMillis() - skinDetectionStartTime) + " ms");
         return result;
     }
 
+    private double distance(Point p1, Point p2) {
+        return Math.sqrt(Math.pow(p1.x - p2.x, 2) + Math.pow(p1.y - p2.y, 2));
+    }
+
+    /**
+     * Euclidean Clustering Algorithm. Takes in a list of all possible hand points, and a matrix
+     * representing state of each point in the image. Shift-factor is the shiftFactor used
+     * when analyzing skin tone (the distance between analyzed points).
+     *
+     * Returns a Set of Set<Point>. That is, a set of all clusters in the image.
+     * @param handPossiblePoints list of all possible hand points
+     * @param handPossibilities matrix at which for each point, value at index 0 is a VISITED flag,
+     *                          and index 1 is a IS_HAND flag.
+     * @param shiftFactor the shiftFactor (distance between measured points on image)
+     * @return
+     */
     private Set<Set<Point>> euclideanClustering(List<Point> handPossiblePoints, Mat handPossibilities, int shiftFactor) {
         Set<Set<Point>> clusters = new HashSet<>();
 
@@ -313,10 +324,7 @@ public class HandDetectionActivity extends Activity implements CvCameraViewListe
                 int row = (int) cur.y;
                 int col = (int) cur.x;
 
-                // if this point has already been processed, no point being here
-
                 cluster.add(cur); // add this point to the cluster
-                Log.i(TAG, "Unprocessed point");
                 // Get neighbors which are hand points
                 for(int j = row - radius; j <= row + radius; j+= shiftFactor) {
                     for (int i = col - radius; i <= col + radius; i += shiftFactor) {
@@ -342,9 +350,21 @@ public class HandDetectionActivity extends Activity implements CvCameraViewListe
                 }
             }
             clusters.add(cluster);
-            Log.e(TAG, "ADDING CLUSTER OF SIZE " + cluster.size());
         }
         return clusters;
+    }
+
+    /**
+     *     Returns a point which is the centroid of the passed-in cluster.
+     */
+    public Point centroid(Set<Point> cluster)  {
+        double centroidX = 0, centroidY = 0;
+
+        for(Point knot : cluster) {
+            centroidX += knot.x;
+            centroidY += knot.y;
+        }
+        return new Point(centroidX / cluster.size(), centroidY / cluster.size());
     }
 
     /** Removes first element from handPossiblePoints. Then, iterates through list to find any direct
@@ -438,8 +458,6 @@ public class HandDetectionActivity extends Activity implements CvCameraViewListe
         return (skinCrCbHist.get((int) ycrcb[1], (int) ycrcb[2])[0] > 0);
     }
 
-
-
     public boolean isSkinRGB(int r, int g, int b) {
         // first easiest comparisons
         if ( (r<95) | (g<40) | (b<20) | (r<g) | (r<b) ) {
@@ -494,6 +512,31 @@ public class HandDetectionActivity extends Activity implements CvCameraViewListe
         }
         return result;
     }
+
+    private Mat skinDetectionYCRCB(CvCameraViewFrame inputFrame) {
+        mRgba = inputFrame.rgba();
+        Mat output = new Mat();
+
+        Scalar minYCrCb = new Scalar(0,133,77);
+        Scalar maxYCrCb = new Scalar(255,173,127);
+
+        Imgproc.cvtColor(mRgba, output, Imgproc.COLOR_RGB2YCrCb);
+
+        Mat inRangeMatrix = new Mat();
+        Core.inRange(output, minYCrCb, maxYCrCb, inRangeMatrix);
+
+        List<MatOfPoint> contours = new LinkedList<>();
+        Mat hierarchy = new Mat();
+        Imgproc.findContours(inRangeMatrix, contours, hierarchy, Imgproc.RETR_EXTERNAL, Imgproc.CHAIN_APPROX_SIMPLE);
+        for(int i = 0; i < contours.size(); i++) {
+            MatOfPoint c = contours.get(i);
+            if(Imgproc.contourArea(c) > 1000) {
+                Imgproc.drawContours(mRgba, contours, i , new Scalar(0, 255, 0), 3);
+            }
+        }
+        return mRgba;
+    }
+
 
 
     // ==== BUTTON CALLBACKS ====
