@@ -42,7 +42,6 @@ public class HandDetectionActivity extends Activity implements CvCameraViewListe
     private Mat                  prevImage;
     private Scalar               mBlobColorRgba;
     private Scalar               mBlobColorHsv;
-    private HandDetector    mDetector;
     private Mat                  mSpectrum;
     private Size                 SPECTRUM_SIZE;
     private Scalar               CONTOUR_COLOR;
@@ -133,7 +132,6 @@ public class HandDetectionActivity extends Activity implements CvCameraViewListe
 
     public void onCameraViewStarted(int width, int height) {
         mRgba = new Mat(height, width, CvType.CV_8UC4);
-        mDetector = new HandDetector();
         mSpectrum = new Mat();
         mBlobColorRgba = new Scalar(255);
         mBlobColorHsv = new Scalar(255);
@@ -148,22 +146,12 @@ public class HandDetectionActivity extends Activity implements CvCameraViewListe
     public Mat onCameraFrame(CvCameraViewFrame inputFrame) {
         if (skinCrCbHist == null) {
             skinCrCbHist =  Mat.zeros(256, 256, CvType.CV_8UC1);
-//          for(int j = 0; j < skinCrCbHist.rows(); j++) {
-//              for (int i = 0; i < skinCrCbHist.cols(); i++) {
-//                  skinCrCbHist.setTo(new Scalar(0, 0, 0)); // set all zeroes
-//              }
-//          }
             Imgproc.ellipse(skinCrCbHist, new Point(113, 155.6), new Size(23.4, 15.2), 43.0, 0.0, 360, new Scalar(255, 255, 255), -1);
         }
-//        if(prevImage == null) {
-//            return inputFrame.rgba();
-//        }
-//        return skinDetectionYCRCB(inputFrame);
-        return skinDetection(inputFrame);
-//        return cornerDetection(inputFrame);
+        return handDetection(inputFrame);
     }
 
-    private Mat skinDetection(CvCameraViewFrame inputFrame) {
+    private Mat handDetection(CvCameraViewFrame inputFrame) {
         // Get start time for optimization purposes
         long skinDetectionStartTime = System.currentTimeMillis();
 
@@ -366,179 +354,6 @@ public class HandDetectionActivity extends Activity implements CvCameraViewListe
         }
         return new Point(centroidX / cluster.size(), centroidY / cluster.size());
     }
-
-    /** Removes first element from handPossiblePoints. Then, iterates through list to find any direct
-     * neighbors which are also possible hand points. If at least three such neighbors are found,
-     * Each of those points is removed from handPossibilePoints and
-     * added to a local cluster. Then, for each of those points, recursively
-     * call this function until we get to a point where there are < 3 neighbors
-     * Returns the cluster for that first point that was removed.
-     */
-    private Set<Point> clusterHelper(Point p, Mat handPossibilities, Set<Set<Point>> clusters, int minNeighbors, final int shiftFactor) {
-        // get first element
-        // check all points around it to see if it has neighboring hand points
-        int row = (int) p.x;
-        int col = (int) p.y;
-        final double[] visitedPointMarker = {255, 0, 0, 255};
-//        handPossibilities.put(row, col, visitedPointMarker); // mark this point as visited
-
-        // how far is someone considered a neighbor?
-        final int neighborDistThresh = 1 * shiftFactor;
-
-        Queue<Point> localCluster = new LinkedList<Point>();
-
-//        // Get number of neighbors which are hand points
-//        for(int i = 0; i < handPossiblePoints.size(); i++) {
-//            Point other = handPossiblePoints.get(i);
-//            if ((other.y - row <= neighborDistThresh ) && (other.x - col <= neighborDistThresh)) {
-//                // This is a handpoint
-//                localCluster.add(other); // add it to localCluster
-//                handPossiblePoints.remove(i); // this point belongs to this cluster one way or another
-//                i--; // we want to stay on this i
-//            }
-//        }
-
-        int numNeighbors = 0; // This is separate from localCluster.size() because
-                                // it includes points which have already been counted
-        // Get number of neighbors which are hand points
-        for(int j = row - neighborDistThresh; j <= row + neighborDistThresh; j+= shiftFactor) {
-            for(int i = col - neighborDistThresh; i <= col + neighborDistThresh; i+= shiftFactor ) {
-                // if it is within bounds
-                if( j > 0 && j < handPossibilities.rows() &&
-                    i > 0 && i < handPossibilities.cols()) {
-                    double[] other = handPossibilities.get(j, i);
-
-                    // if this point is a handPoint and has not been visited
-                    if (other[0] == 255) {
-                        // This is a handpoint
-                        if(other[1] == 255) {
-                            // only add to cluster if not visited
-                            localCluster.add(new Point(i, j)); // add it to localCluster
-                            other[1] = 0; // disable this point
-                            handPossibilities.put(j, i, other); // disable this point
-                        }
-
-                        // add this point to numNeighbors
-                        // whether or not it was previously visited
-                        numNeighbors++;
-
-                    }
-                }
-            }
-        }
-
-//        if(numNeighbors < minNeighbors) {
-//            // Since there werent enough neighbors, return empty hashset -- dont want outliers
-//            return new HashSet<Point>();
-//        }
-
-        // This will store any results passed up to us from recursive calls
-        Set<Point> resultCluster = new HashSet<Point>();
-
-        // If we get here, we need to remove all the points in localCluster from
-        // handPossiblePoints. We will do this, then recurse, for each point
-
-        // For each point in localCluster, remove it from handPossiblePoints,
-        // add it to the final Result cluster and
-        // recurse, adding returned Points to resultCluster
-        for(Point toRecurse : localCluster) {
-            resultCluster.add(toRecurse);
-            resultCluster.addAll(clusterHelper(toRecurse, handPossibilities, clusters, minNeighbors, shiftFactor));
-        }
-        return resultCluster;
-    }
-
-    public static boolean isSkin(Scalar color) {
-        Mat input = new Mat(new Size(1, 1), CvType.CV_8UC3, color);
-        Mat output = new Mat();
-
-        Imgproc.cvtColor(input, output, Imgproc.COLOR_RGB2YCrCb);
-
-        double ycrcb[] = output.get(0, 0);
-        return (skinCrCbHist.get((int) ycrcb[1], (int) ycrcb[2])[0] > 0);
-    }
-
-    public boolean isSkinRGB(int r, int g, int b) {
-        // first easiest comparisons
-        if ( (r<95) | (g<40) | (b<20) | (r<g) | (r<b) ) {
-            return false; // no match, stop function here
-        }
-        int d = r-g;
-        if ( -15<d && d<15) {
-            return false; // no match, stop function here
-        }
-        // we have left most time consuming operation last
-        // hopefully most of the time we are not reaching this point
-        int max = Math.max(r, Math.max(g,b));
-        int min = Math.min(r, Math.min(g,b));
-        if ((max-min)<15) {
-            // this is the worst case
-            return false; // no match, stop function
-        }
-        // all comparisons passed
-        return true;
-    }
-
-    private Mat cornerDetection(CvCameraViewFrame inputFrame) {
-        mRgba = inputFrame.gray();
-        Mat down = new Mat();
-        Imgproc.pyrDown(mRgba, down, new Size(mRgba.cols() / 2, mRgba.rows() / 2));
-//        Imgproc.pyrdown
-//        Mat down2 = new Mat();
-//        Imgproc.pyrDown(down, down2);
-//        Mat down3 = new Mat();
-//        Imgproc.pyrDown(down2, down3);
-
-        Mat dst = new Mat();
-        Mat dst_norm = new Mat();
-        Mat dst_norm_scaled = new Mat();
-
-
-        Imgproc.cornerHarris(down, dst, blockSize, apertureSize, Core.BORDER_DEFAULT );
-        Core.normalize(dst, dst_norm, 0, 255, Core.NORM_MINMAX, CvType.CV_32FC1, new Mat());
-        Core.convertScaleAbs(dst_norm, dst_norm_scaled);
-
-//        Mat upTemp = new Mat();
-//        Imgproc.pyrUp(dst_norm_scaled, upTemp);
-        Mat result = new Mat();
-        Imgproc.pyrUp(dst_norm_scaled, result, new Size(mRgba.cols(), mRgba.rows()));
-        for(int j = 0; j < dst_norm.rows(); j++) {
-            for(int i = 0; i < dst_norm.cols(); i++) {
-                if(dst_norm.get(j, i)[0] <100 ) {
-//                    Log.i(TAG, "Drawing circle at (" + i + ", " + j + ")");
-                    Imgproc.circle(result, new Point(i * 2, j * 2), 5, new Scalar(0), 2, 8, 0);
-                }
-            }
-        }
-        return result;
-    }
-
-    private Mat skinDetectionYCRCB(CvCameraViewFrame inputFrame) {
-        mRgba = inputFrame.rgba();
-        Mat output = new Mat();
-
-        Scalar minYCrCb = new Scalar(0,133,77);
-        Scalar maxYCrCb = new Scalar(255,173,127);
-
-        Imgproc.cvtColor(mRgba, output, Imgproc.COLOR_RGB2YCrCb);
-
-        Mat inRangeMatrix = new Mat();
-        Core.inRange(output, minYCrCb, maxYCrCb, inRangeMatrix);
-
-        List<MatOfPoint> contours = new LinkedList<>();
-        Mat hierarchy = new Mat();
-        Imgproc.findContours(inRangeMatrix, contours, hierarchy, Imgproc.RETR_EXTERNAL, Imgproc.CHAIN_APPROX_SIMPLE);
-        for(int i = 0; i < contours.size(); i++) {
-            MatOfPoint c = contours.get(i);
-            if(Imgproc.contourArea(c) > 1000) {
-                Imgproc.drawContours(mRgba, contours, i , new Scalar(0, 255, 0), 3);
-            }
-        }
-        return mRgba;
-    }
-
-
-
     // ==== BUTTON CALLBACKS ====
 
     public void onIncrBlockSize(View v) {
