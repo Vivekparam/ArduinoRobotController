@@ -1,8 +1,10 @@
 package com.param.vivek.arduinorobotcontroller;
 
 import android.app.Activity;
+import android.content.Context;
 import android.hardware.Camera;
 import android.os.Bundle;
+import android.os.Handler;
 import android.util.Log;
 import android.view.MotionEvent;
 import android.view.View;
@@ -33,18 +35,19 @@ import java.util.List;
 import java.util.Queue;
 import java.util.Set;
 import java.util.Timer;
+import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.LinkedBlockingQueue;
 
 public class HandDetectionActivity extends Activity implements CvCameraViewListener2 {
     private static final String  TAG              = "HandDetection::Activity";
-
-    private boolean              mIsColorSelected = false;
     private Mat                  mRgba;
-    private Mat                  prevImage;
-    private Scalar               mBlobColorRgba;
-    private Scalar               mBlobColorHsv;
-    private Mat                  mSpectrum;
-    private Size                 SPECTRUM_SIZE;
-    private Scalar               CONTOUR_COLOR;
+
+    private boolean inCommunication;
+
+    private BlockingQueue<String> eventQueue;
+    private Context mContext;
+
+
 
 
     // TODO: MOVE THIS TO SEPARATE CLASS
@@ -93,14 +96,19 @@ public class HandDetectionActivity extends Activity implements CvCameraViewListe
         }
         mOpenCvCameraView.setCvCameraViewListener(this);
 
-//        skinCrCbHist = new Mat();
-//        skinCrCbHist.se
-////        for(int j = 0; j < skinCrCbHist.rows(); j++) {
-////            for (int i = 0; i < skinCrCbHist.cols(); i++) {
-////                skinCrCbHist.setTo(new Scalar(0, 0, 0)); // set all zeroes
-////            }
-////        }
-//        Imgproc.ellipse(skinCrCbHist, new Point(113, 155.6), new Size(23.4, 15.2), 43.0, 0.0, 360, new Scalar(255, 255, 255), -1);
+        inCommunication = false;
+        eventQueue = new LinkedBlockingQueue<>(1); // only store one element
+        mContext = this;
+
+//        (new Thread() {
+//            public void run() {
+                try {
+                    boolean result = establishConnection();
+                } catch (Exception e) {
+                    Log.e(TAG, "FAILED TO CONNECT");
+                }
+//            }
+//        }).start();
     }
 
     @Override
@@ -132,15 +140,31 @@ public class HandDetectionActivity extends Activity implements CvCameraViewListe
 
     public void onCameraViewStarted(int width, int height) {
         mRgba = new Mat(height, width, CvType.CV_8UC4);
-        mSpectrum = new Mat();
-        mBlobColorRgba = new Scalar(255);
-        mBlobColorHsv = new Scalar(255);
-        SPECTRUM_SIZE = new Size(200, 64);
-        CONTOUR_COLOR = new Scalar(255,0,0,255);
     }
 
     public void onCameraViewStopped() {
         mRgba.release();
+    }
+
+    public boolean isSkinRGB(int r, int g, int b) {
+        // first easiest comparisons
+        if ( (r<95) | (g<40) | (b<20) | (r<g) | (r<b) ) {
+            return false; // no match, stop function here
+        }
+        int d = r-g;
+        if ( -15<d && d<15) {
+            return false; // no match, stop function here
+        }
+        // we have left most time consuming operation last
+        // hopefully most of the time we are not reaching this point
+        int max = Math.max(r, Math.max(g,b));
+        int min = Math.min(r, Math.min(g,b));
+        if ((max-min)<15) {
+            // this is the worst case
+            return false; // no match, stop function
+        }
+        // all comparisons passed
+        return true;
     }
 
     public Mat onCameraFrame(CvCameraViewFrame inputFrame) {
@@ -249,30 +273,42 @@ public class HandDetectionActivity extends Activity implements CvCameraViewListe
         // draw direction rectangles, find which one centroid is in
         Scalar white = new Scalar(255, 255, 255);
         Scalar selected = new Scalar(0, 255, 0);
-        for(int n = 0; n < 5; n++) {
+        int top = 0; // 1/6 of the way down
+        int left = 1 * down.cols() / 6; // 1/6 of the way across
+
+        double cols = 4.0 / 6 * down.cols();
+        double rows = down.rows();
+        for(int n = 0; n < 9; n++) {
             Scalar color = white;
-            if(centroid.x > n * down.cols() / 5 && centroid.x < (1+n) * down.cols() / 5) {
-                color = selected;
+            if(centroid.x > (left + (n % 3) * cols / 3) && centroid.x < (left + (1 + (n % 3)) * cols / 3)) {
+                if (centroid.y > (top + (n/3) * rows / 3) && centroid.y < (top + (1 + (n / 3)) * rows / 3)) {
+                    color = selected;
+                    sendCommand(n);
+                }
             }
-            Imgproc.rectangle(resultDown, new Point(n * down.cols() / 5, 0), new Point((1+n) * down.cols() / 5, down.rows()), color, 7);
+
+            Imgproc.rectangle(resultDown,
+                    new Point(left + (n % 3) * cols / 3, top + (n / 3) * rows / 3),
+                    new Point(left + ((n % 3) + 1) * cols / 3, top + ((n / 3) + 1) * rows / 3),
+                    color,
+                    4);
         }
 
 
         Mat result = new Mat();
         Imgproc.pyrUp(resultDown, result, new Size(mRgba.cols(), mRgba.rows()));
 
-        // calculate direction to send Robot
-
-        if(distance(centroid, imgCenterPoint) > 100) {
-            if(centroid.x > imgCenterCol + 200) {
-
-            }
-        }
-
-        Log.e(TAG, "[time] SKIN_DETECT_AND_CLUSTER took: " + (System.currentTimeMillis() - skinDetectionStartTime) + " ms");
+        Log.e(TAG, "[time] SKIN_DETECT_AND_CLUSTER took: " +
+                (System.currentTimeMillis() - skinDetectionStartTime) + " ms");
         return result;
     }
 
+    /**
+     * Returns the euclidean distance between two points
+     * @param p1
+     * @param p2
+     * @return
+     */
     private double distance(Point p1, Point p2) {
         return Math.sqrt(Math.pow(p1.x - p2.x, 2) + Math.pow(p1.y - p2.y, 2));
     }
@@ -354,29 +390,127 @@ public class HandDetectionActivity extends Activity implements CvCameraViewListe
         }
         return new Point(centroidX / cluster.size(), centroidY / cluster.size());
     }
-    // ==== BUTTON CALLBACKS ====
 
-    public void onIncrBlockSize(View v) {
-        blockSize++;
-        Log.e(TAG, "[camparams] Blocksize incremented to " + blockSize);
-    }
+    // ==== Hand position COMMANDS ====
 
-    public void onDecrBlockSize(View v) {
-        if (blockSize > 1) {
-            blockSize--;
+    /** converts box number into command
+     *
+     * @param n box number
+     */
+    public void sendCommand(int n) {
+        switch (n) {
+            case 0:
+                // q - FORWARD LEFT
+                commandForwardLeft();
+                break;
+            case 1:
+                // w - FORWARD
+                commandForward();
+                break;
+            case 2:
+                // e - FORWARD RIGHT
+                commandForwardRight();
+                break;
+            case 3:
+                // a - LEFT
+                commandLeft();
+                break;
+            case 4:
+                // s - STOP
+                commandStop();
+                break;
+            case 5:
+                // d - RIGHT
+                commandRight();
+                break;
+            case 6:
+                // z - BACK LEFT
+                commandBackLeft();
+                break;
+            case 7:
+                // x - BACK
+                commandBack();
+                break;
+            case 8:
+                // c - BACK RIGHT
+                commandBackRight();
+                break;
+
         }
-        Log.e(TAG, "[camparams] Blocksize decremented to " + blockSize);
     }
 
-    public void onIncrApertureSize(View v) {
-        apertureSize += 2; // must remain odd
-        Log.e(TAG, "[camparams] apertureSize incremented to " + apertureSize);
+    private void commandForwardLeft() {
+        Log.d(TAG, "Move Forward-Left");
+        if(inCommunication)
+            addToEventQueue("q");
+    }
+    public void commandForward() {
+        Log.d(TAG, "Move Forward");
+        if(inCommunication)
+            addToEventQueue("w");
     }
 
-    public void onDecrApertureSize(View v) {
-        if (apertureSize >= 3) {
-            apertureSize -= 2;
+    private void commandForwardRight() {
+        Log.d(TAG, "Move Forward-Right");
+        if(inCommunication)
+            addToEventQueue("e");
+    }
+
+    public void commandLeft() {
+        Log.d(TAG, "Move Left");
+        if(inCommunication)
+            addToEventQueue("a");
+    }
+
+    private void commandStop() {
+        Log.d(TAG, "Move Stop");
+        if(inCommunication)
+            addToEventQueue("s");
+    }
+
+    public void commandRight() {
+        Log.d(TAG, "Move Right");
+        if(inCommunication)
+            addToEventQueue("d");
+    }
+
+    private void commandBackLeft() {
+        Log.d(TAG, "Move Back Left");
+        if(inCommunication)
+            addToEventQueue("z");
+    }
+
+    public void commandBack() {
+        Log.d(TAG, "Move Back");
+        if(inCommunication)
+            addToEventQueue("x");
+    }
+
+    private void commandBackRight() {
+        Log.d(TAG, "Move Back Right");
+        if(inCommunication)
+            addToEventQueue("c");
+    }
+
+    private void addToEventQueue(String c) {
+        if (eventQueue.remainingCapacity() > 0) {
+            try {
+                eventQueue.add(c);
+            } catch(IllegalStateException e) {
+                Log.e(TAG, "Adding to full q");
+            }
         }
-        Log.e(TAG, "[camparams] apertureSize decremented to " + apertureSize);
+    }
+
+    // === SERIAL COMMUNICATION ===
+
+    public boolean establishConnection() {
+        if(inCommunication) return false; // dont re-start
+        Handler handler = new Handler();
+        SerialCommunicationThread thread = new SerialCommunicationThread(mContext, null, eventQueue, handler);
+        Thread t = new Thread(thread);
+        t.start();
+        inCommunication = true;
+        return true;
     }
 }
